@@ -221,6 +221,24 @@ function inferTargetCalories(entry) {
   return null;
 }
 
+function inferBurnedCalories(entry) {
+  const directBurned = getNumericField(entry, [
+    "Energy Burned (kcal)",
+    "Calories Burned (kcal)",
+    "Expenditure (kcal)",
+    "Total Burned (kcal)",
+    "Burned (kcal)",
+    "TDEE (kcal)",
+    "Total Energy Expenditure (kcal)",
+  ]);
+
+  if (directBurned) {
+    return { burned: directBurned.value, source: `entry:${directBurned.key}` };
+  }
+
+  return null;
+}
+
 function normalizeNutritionList(data) {
   if (!data) return [];
   if (Array.isArray(data)) return data;
@@ -551,7 +569,13 @@ app.get(
         ? req.query.range.trim()
         : `${days}d`;
 
-    const completedOnly = asBoolean(req.query.completed_only);
+    const completedOnly =
+      req.query.completed_only === undefined
+        ? true
+        : asBoolean(req.query.completed_only);
+    const dailyBurnOverride =
+      parseNumber(req.query.daily_burn_kcal) ??
+      parseNumber(process.env.CRONO_DEFAULT_DAILY_BURN_KCAL);
 
     const [nutritionRaw, exercisesRaw] = await Promise.all([
       runCronoJson(["export", "nutrition", "--range", range, "--json"]),
@@ -570,9 +594,27 @@ app.get(
       .map((entry) => {
         const date = entry?.date || null;
         const consumed = parseNumber(entry?.calories) ?? 0;
-        const burnedAgg = date ? burnedByDate.get(date) : undefined;
-        const burned = burnedAgg?.burnedCalories ?? 0;
-        const burnedRaw = burnedAgg?.burnedRawCalories ?? 0;
+        const burnedAgg = date ? burnedByDate.get(date) : null;
+        const inferredBurned = inferBurnedCalories(entry);
+
+        let burned = 0;
+        let burnedRaw = 0;
+        let burnedSource = "exercise_export_abs";
+
+        if (dailyBurnOverride !== null) {
+          burned = dailyBurnOverride;
+          burnedRaw = dailyBurnOverride;
+          burnedSource = "daily_burn_override";
+        } else if (inferredBurned) {
+          burned = inferredBurned.burned;
+          burnedRaw = inferredBurned.burned;
+          burnedSource = inferredBurned.source;
+        } else if (burnedAgg) {
+          burned = burnedAgg.burnedCalories;
+          burnedRaw = burnedAgg.burnedRawCalories;
+          burnedSource = "exercise_export_abs";
+        }
+
         const net = consumed - burned;
         return {
           date,
@@ -580,6 +622,7 @@ app.get(
           consumedCalories: consumed,
           burnedCalories: burned,
           burnedRawCalories: burnedRaw,
+          burnedSource,
           netCalories: net,
           status: net < 0 ? "deficit" : net > 0 ? "surplus" : "at_target",
         };
@@ -591,12 +634,15 @@ app.get(
     const burnedRawTotal = perDay.reduce((sum, d) => sum + d.burnedRawCalories, 0);
     const netTotal = consumedTotal - burnedTotal;
     const averagePerDay = daysUsed === 0 ? 0 : netTotal / daysUsed;
+    const averageDeficitPerDay = averagePerDay < 0 ? Math.abs(averagePerDay) : 0;
+    const averageSurplusPerDay = averagePerDay > 0 ? averagePerDay : 0;
 
     res.json({
       range,
       daysRequested: days,
       daysUsed,
       completedOnly,
+      dailyBurnOverride,
       formula:
         "(trailing calories consumed total - trailing calories burned total) / daysUsed",
       totals: {
@@ -606,6 +652,8 @@ app.get(
         netCalories: netTotal,
       },
       averageNetCaloriesPerDay: averagePerDay,
+      averageDeficitPerDay,
+      averageSurplusPerDay,
       averageStatus:
         averagePerDay < 0
           ? "deficit"
@@ -613,8 +661,10 @@ app.get(
             ? "surplus"
             : "at_target",
       notes: [
-        "burnedCalories is derived from absolute value of exercise export caloriesBurned entries",
-        "burnedRawCalories preserves source sign from Cronometer export",
+        "completedOnly defaults to true",
+        "set daily_burn_kcal to use a fixed burned value per day (for report-style TDEE math)",
+        "if daily_burn_kcal is unset, endpoint tries nutrition burned fields first, then falls back to absolute exercise caloriesBurned",
+        "burnedRawCalories preserves raw source sign/value",
         "if averageNetCaloriesPerDay is positive, that is an average surplus",
       ],
       perDay,

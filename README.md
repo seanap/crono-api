@@ -157,12 +157,17 @@ curl -s "$BASE_URL/api/v1/summary/calorie-balance?range=2026-02-01:2026-02-13"
 curl -s "$BASE_URL/api/v1/summary/weekly-average-deficit?days=7"
 curl -s "$BASE_URL/api/v1/summary/weekly-average-deficit?range=2026-02-01:2026-02-13"
 curl -s "$BASE_URL/api/v1/summary/weekly-average-deficit?days=7&completed_only=true"
+
+# if you want report-style burned calories (for example 2850/day):
+curl -s "$BASE_URL/api/v1/summary/weekly-average-deficit?days=7&daily_burn_kcal=2850"
 ```
 
 `weekly-average-deficit` details:
 
 - `consumedCalories` comes from nutrition export daily calories.
-- `burnedCalories` comes from exercise export `caloriesBurned` with absolute-value normalization.
+- `completed_only` defaults to `true`.
+- `burnedCalories` defaults to nutrition burned fields when available, otherwise exercise export `caloriesBurned` with absolute-value normalization.
+- `daily_burn_kcal` lets you force a fixed burned-per-day value (useful to match Cronometer report TDEE-based deficit calculations).
 - `burnedRawCalories` preserves raw Cronometer sign (your current data is negative for burned).
 - `averageNetCaloriesPerDay`:
   - `< 0` means average deficit
