@@ -1,15 +1,15 @@
-# crono-api (LAN wrapper for `@milldr/crono`)
+# crono-api 
+### Local API wrapper for `@milldr/crono`
 
 Local HTTP API around [`@milldr/crono`](https://www.npmjs.com/package/@milldr/crono) so other apps on your LAN can read/write Cronometer data without using the CLI directly.
 
 This project is designed for homelab usage:
 
-- no public deployment requirements
-- runs with Dockge using `compose.yaml`
+- runs with Dockge using `compose.yaml` and `.env`
 - auto-updates `@milldr/crono` to latest npm on every container start
 - loads credentials from an externally mounted `.env`
 
-## Upstream Research Summary
+## Crono Summary
 
 Based on current upstream repo/package (`milldr/crono`, npm `@milldr/crono`):
 
@@ -23,7 +23,7 @@ Based on current upstream repo/package (`milldr/crono`, npm `@milldr/crono`):
   - `quick-add`
   - `add custom-food`
   - `log`
-- Interactive `login` exists in upstream CLI, but this API wrapper uses non-interactive credential sync from env instead (container-friendly).
+- Interactive `login` exists in upstream CLI, but this API wrapper uses non-interactive credential sync from `.env` instead to make it container-friendly.
 
 References:
 
@@ -32,90 +32,60 @@ References:
 
 ## Setup
 
-1. Create your persistent env file:
+1. Quick Start:
 
-```bash
-mkdir -p config data
-cp .env.example config/.env
+```yaml
+services:
+  crono-api:
+    image: seanap/crono-api:latest
+    container_name: crono-api
+    restart: unless-stopped
+    ports:
+      - 8777:8080
+    environment:
+      - TZ=America/New_York
+      - HOME=/data
+      - CRONO_ENV_FILE=/app/config/.env
+    volumes:
+      - /opt/stacks/crono-api/data:/data
+      - /opt/stacks/crono-api/.env:/app/config/.env:ro
 ```
 
-2. Edit `config/.env` and set:
+2. Edit `.env` and set:
 
 - `CRONO_KERNEL_API_KEY`
 - `CRONO_CRONOMETER_EMAIL`
 - `CRONO_CRONOMETER_PASSWORD`
-- `CRONO_API_KEY`
+- `CRONO_ALLOW_NO_API_KEY=true`
 
-3. Start:
+3. API is available at:
 
-```bash
-docker compose -f compose.yaml up -d --build
 ```
-
-4. API is available at:
-
-```text
-http://<docker-host-lan-ip>:8787
+http://<docker-host-lan-ip>:8777
 ```
-
-## Docker Hub Publish
-
-Local Docker is unavailable in this execution environment, so publishing is set up via GitHub Actions:
-
-- Workflow file: `.github/workflows/dockerhub.yml`
-- Image target: `<DOCKERHUB_USERNAME>/crono-api`
-- Triggers: push to `main` and manual dispatch
-
-Required repo secrets:
-
-- `DOCKERHUB_USERNAME`
-- `DOCKERHUB_TOKEN` (Docker Hub access token)
-
-Set secrets:
-
-```bash
-gh secret set DOCKERHUB_USERNAME -R seanap/crono-api
-gh secret set DOCKERHUB_TOKEN -R seanap/crono-api
-```
-
-Run publish workflow:
-
-```bash
-gh workflow run "Publish Docker Image" -R seanap/crono-api
-```
-
-Watch workflow:
-
-```bash
-gh run list -R seanap/crono-api
-gh run view <run-id> -R seanap/crono-api --log
-```
-
-## Dockge Notes
-
-- `compose.yaml` is Dockge-friendly.
-- `./config/.env:/app/config/.env:ro` is the external persisted env mount.
-- `./data:/data` persists crono config/runtime files.
-
-If you prefer absolute host paths in Dockge, replace the bind mounts with your server paths.
-
-If you want Dockge to pull from Docker Hub instead of building locally, use `compose.dockerhub.yaml`.
 
 ## Auth
 
-If you run with `CRONO_ALLOW_NO_API_KEY=true`, requests do not need auth headers.
+If you set `.env` with `CRONO_ALLOW_NO_API_KEY=true`, requests do not need auth headers.
 
 If you run with API key auth enabled, pass:
 
+- In `.env` include `CRONO_API_KEY=<input_strong_key_here>`
 - `x-api-key: <CRONO_API_KEY>`
 - or `Authorization: Bearer <CRONO_API_KEY>`
+
+If API key auth is enabled, add this header to all calls:
+
+```bash
+-H "x-api-key: $CRONO_API_KEY"
+```
 
 ## All Endpoint Examples
 
 Base URL used below:
 
 ```bash
-BASE_URL="http://192.168.1.9:8777"
+BASE_URL="http://<host_IP>:8777"
 ```
 
 Read endpoints:
@@ -199,12 +169,6 @@ curl -s -X POST \
 curl -s -X POST \
   -H "content-type: application/json" \
   "$BASE_URL/api/v1/admin/sync-credentials"
-```
-
-If API key auth is enabled, add this header to all calls:
-
-```bash
--H "x-api-key: $CRONO_API_KEY"
 ```
 
 ## How Auto-Update Works
