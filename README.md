@@ -53,10 +53,14 @@ services:
 
 2. Edit `.env` and set:
 
-- `CRONO_KERNEL_API_KEY`
-- `CRONO_CRONOMETER_EMAIL`
-- `CRONO_CRONOMETER_PASSWORD`
-- `CRONO_ALLOW_NO_API_KEY=true`
+```yaml
+CRONO_KERNEL_API_KEY=<sk_...>
+CRONO_CRONOMETER_EMAIL=your_email@example.com
+CRONO_CRONOMETER_PASSWORD=your_cronometer_pass
+## Auth
+CRONO_ALLOW_NO_API_KEY=true
+# CRONO_API_KEY=<input_strong_key_here>
+```
 
 3. API is available at:
 
