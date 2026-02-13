@@ -103,115 +103,93 @@ If you want Dockge to pull from Docker Hub instead of building locally, use `com
 
 ## Auth
 
-Pass your local API key on every request:
+If you run with `CRONO_ALLOW_NO_API_KEY=true`, requests do not need auth headers.
+
+If you run with API key auth enabled, pass:
 
 - `x-api-key: <CRONO_API_KEY>`
 - or `Authorization: Bearer <CRONO_API_KEY>`
 
-## Endpoint Map
+## All Endpoint Examples
 
-### Read
-
-- `GET /health`
-- `GET /api/v1/endpoints`
-- `GET /api/v1/diary?date=YYYY-MM-DD`
-- `GET /api/v1/diary?range=7d`
-- `GET /api/v1/weight?date=YYYY-MM-DD`
-- `GET /api/v1/weight?range=7d`
-- `GET /api/v1/export/nutrition?date=YYYY-MM-DD`
-- `GET /api/v1/export/nutrition?range=7d`
-- `GET /api/v1/export/nutrition?range=30d&csv=true`
-- `GET /api/v1/export/exercises?range=7d`
-- `GET /api/v1/export/biometrics?range=30d`
-- `GET /api/v1/summary/today-macros`
-- `GET /api/v1/summary/today-macros?date=YYYY-MM-DD`
-- `GET /api/v1/summary/calorie-balance?days=7`
-- `GET /api/v1/summary/calorie-balance?days=7&target_kcal=2400`
-- `GET /api/v1/summary/calorie-balance?range=2026-02-01:2026-02-07`
-
-### Write
-
-- `POST /api/v1/quick-add`
-- `POST /api/v1/add/custom-food`
-- `POST /api/v1/log`
-- `POST /api/v1/admin/sync-credentials`
-
-## Required Endpoints You Asked For
-
-### 1) Current day protein + carbs
+Base URL used below:
 
 ```bash
-curl -s \
-  -H "x-api-key: $CRONO_API_KEY" \
-  "http://localhost:8787/api/v1/summary/today-macros"
+BASE_URL="http://192.168.1.9:8777"
 ```
 
-Response includes:
-
-- `protein`
-- `carbs`
-- `fat`
-- `calories`
-- `date`
-
-### 2) Trailing 7-day calorie deficit/surplus
+Read endpoints:
 
 ```bash
-curl -s \
-  -H "x-api-key: $CRONO_API_KEY" \
-  "http://localhost:8787/api/v1/summary/calorie-balance?days=7"
+# health and endpoint discovery
+curl -s "$BASE_URL/health"
+curl -s "$BASE_URL/api/v1/endpoints"
+
+# diary
+curl -s "$BASE_URL/api/v1/diary"
+curl -s "$BASE_URL/api/v1/diary?date=2026-02-13"
+curl -s "$BASE_URL/api/v1/diary?range=7d"
+curl -s "$BASE_URL/api/v1/diary?range=2026-02-01:2026-02-13"
+
+# weight
+curl -s "$BASE_URL/api/v1/weight"
+curl -s "$BASE_URL/api/v1/weight?date=2026-02-13"
+curl -s "$BASE_URL/api/v1/weight?range=7d"
+curl -s "$BASE_URL/api/v1/weight?range=2026-02-01:2026-02-13"
+
+# export nutrition / exercises / biometrics
+curl -s "$BASE_URL/api/v1/export/nutrition"
+curl -s "$BASE_URL/api/v1/export/nutrition?range=7d"
+curl -s "$BASE_URL/api/v1/export/nutrition?date=2026-02-13"
+curl -s "$BASE_URL/api/v1/export/nutrition?range=30d&csv=true"
+curl -s "$BASE_URL/api/v1/export/exercises?range=7d"
+curl -s "$BASE_URL/api/v1/export/biometrics?range=30d"
+
+# required summaries
+curl -s "$BASE_URL/api/v1/summary/today-macros"
+curl -s "$BASE_URL/api/v1/summary/today-macros?date=2026-02-13"
+curl -s "$BASE_URL/api/v1/summary/calorie-balance?days=7"
+curl -s "$BASE_URL/api/v1/summary/calorie-balance?days=7&target_kcal=2400"
+curl -s "$BASE_URL/api/v1/summary/calorie-balance?range=2026-02-01:2026-02-13"
 ```
 
-If Cronometer export includes a calorie target column, it is inferred automatically.
-If not, pass `target_kcal` query param or set `CRONO_DEFAULT_CALORIE_TARGET` in `.env`.
-
-Response includes:
-
-- `totalNetCalories` (`> 0` = surplus, `< 0` = deficit)
-- `totalDeficitCalories`
-- `totalSurplusCalories`
-- `trend`
-- `perDay[]`
-
-## Write Examples
-
-Quick add:
+Write endpoints:
 
 ```bash
+# quick-add
 curl -s -X POST \
   -H "content-type: application/json" \
-  -H "x-api-key: $CRONO_API_KEY" \
   -d '{"protein":30,"carbs":100,"fat":20,"meal":"Dinner"}' \
-  "http://localhost:8787/api/v1/quick-add"
-```
+  "$BASE_URL/api/v1/quick-add"
 
-Add custom food:
-
-```bash
+# add custom food
 curl -s -X POST \
   -H "content-type: application/json" \
-  -H "x-api-key: $CRONO_API_KEY" \
-  -d '{"name":"Post-Workout Shake","protein":40,"carbs":60,"log":"Snacks"}' \
-  "http://localhost:8787/api/v1/add/custom-food"
-```
+  -d '{"name":"Post-Workout Shake","protein":40,"carbs":60,"fat":10}' \
+  "$BASE_URL/api/v1/add/custom-food"
 
-Log food:
-
-```bash
+# add custom food and also log it
 curl -s -X POST \
   -H "content-type: application/json" \
-  -H "x-api-key: $CRONO_API_KEY" \
+  -d '{"name":"Wendys Sandwich","protein":50,"carbs":100,"fat":50,"log":"Dinner"}' \
+  "$BASE_URL/api/v1/add/custom-food"
+
+# log existing food
+curl -s -X POST \
+  -H "content-type: application/json" \
   -d '{"name":"Post-Workout Shake","meal":"Snacks","servings":1}' \
-  "http://localhost:8787/api/v1/log"
-```
+  "$BASE_URL/api/v1/log"
 
-Refresh credentials from env/body:
-
-```bash
+# re-sync credentials after editing mounted .env
 curl -s -X POST \
   -H "content-type: application/json" \
-  -H "x-api-key: $CRONO_API_KEY" \
-  "http://localhost:8787/api/v1/admin/sync-credentials"
+  "$BASE_URL/api/v1/admin/sync-credentials"
+```
+
+If API key auth is enabled, add this header to all calls:
+
+```bash
+-H "x-api-key: $CRONO_API_KEY"
 ```
 
 ## How Auto-Update Works

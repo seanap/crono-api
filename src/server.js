@@ -432,12 +432,17 @@ app.post(
 app.get(
   "/api/v1/summary/today-macros",
   asyncRoute(async (req, res) => {
-    const date =
-      typeof req.query.date === "string" && req.query.date.trim()
-        ? req.query.date.trim()
-        : new Date().toISOString().slice(0, 10);
+    const hasDate =
+      typeof req.query.date === "string" && req.query.date.trim() !== "";
+    const date = hasDate ? req.query.date.trim() : null;
 
-    const data = await runCronoJson(["export", "nutrition", "--date", date, "--json"]);
+    const args = ["export", "nutrition"];
+    if (date) {
+      args.push("--date", date);
+    }
+    args.push("--json");
+
+    const data = await runCronoJson(args);
     const entry = Array.isArray(data) ? data[0] : data;
 
     if (!entry) {
