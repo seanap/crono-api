@@ -251,12 +251,6 @@ function normalizeExerciseList(data) {
   return [data];
 }
 
-function asBoolean(value) {
-  if (typeof value === "boolean") return value;
-  if (typeof value !== "string") return false;
-  return ["1", "true", "yes", "on"].includes(value.toLowerCase());
-}
-
 function aggregateBurnedByDate(exercises) {
   const byDate = new Map();
 
@@ -354,7 +348,7 @@ app.get(
         "GET /api/v1/export/{nutrition|exercises|biometrics}?date=YYYY-MM-DD|range=7d&csv=true",
         "GET /api/v1/summary/today-macros?date=YYYY-MM-DD",
         "GET /api/v1/summary/calorie-balance?days=7&target_kcal=2400",
-        "GET /api/v1/summary/weekly-average-deficit?days=7&completed_only=false",
+        "GET /api/v1/summary/weekly-average-deficit?days=7",
       ],
       write: [
         "POST /api/v1/quick-add",
@@ -569,14 +563,6 @@ app.get(
         ? req.query.range.trim()
         : `${days}d`;
 
-    const completedOnly =
-      req.query.completed_only === undefined
-        ? true
-        : asBoolean(req.query.completed_only);
-    const dailyBurnOverride =
-      parseNumber(req.query.daily_burn_kcal) ??
-      parseNumber(process.env.CRONO_DEFAULT_DAILY_BURN_KCAL);
-
     const [nutritionRaw, exercisesRaw] = await Promise.all([
       runCronoJson(["export", "nutrition", "--range", range, "--json"]),
       runCronoJson(["export", "exercises", "--range", range, "--json"]),
@@ -587,10 +573,9 @@ app.get(
     const burnedByDate = aggregateBurnedByDate(exerciseEntries);
 
     const perDay = nutritionEntries
-      .filter((entry) => {
-        if (!completedOnly) return true;
-        return String(entry?.Completed || "").toLowerCase() === "true";
-      })
+      .filter(
+        (entry) => String(entry?.Completed || "").toLowerCase() === "true"
+      )
       .map((entry) => {
         const date = entry?.date || null;
         const consumed = parseNumber(entry?.calories) ?? 0;
@@ -601,11 +586,7 @@ app.get(
         let burnedRaw = 0;
         let burnedSource = "exercise_export_abs";
 
-        if (dailyBurnOverride !== null) {
-          burned = dailyBurnOverride;
-          burnedRaw = dailyBurnOverride;
-          burnedSource = "daily_burn_override";
-        } else if (inferredBurned) {
+        if (inferredBurned) {
           burned = inferredBurned.burned;
           burnedRaw = inferredBurned.burned;
           burnedSource = inferredBurned.source;
@@ -641,8 +622,7 @@ app.get(
       range,
       daysRequested: days,
       daysUsed,
-      completedOnly,
-      dailyBurnOverride,
+      completedOnly: true,
       formula:
         "(trailing calories consumed total - trailing calories burned total) / daysUsed",
       totals: {
@@ -661,9 +641,8 @@ app.get(
             ? "surplus"
             : "at_target",
       notes: [
-        "completedOnly defaults to true",
-        "set daily_burn_kcal to use a fixed burned value per day (for report-style TDEE math)",
-        "if daily_burn_kcal is unset, endpoint tries nutrition burned fields first, then falls back to absolute exercise caloriesBurned",
+        "completed days only are included",
+        "burnedCalories comes from nutrition burned fields when present, else falls back to absolute exercise caloriesBurned",
         "burnedRawCalories preserves raw source sign/value",
         "if averageNetCaloriesPerDay is positive, that is an average surplus",
       ],
