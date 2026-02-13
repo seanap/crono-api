@@ -239,6 +239,84 @@ function inferBurnedCalories(entry) {
   return null;
 }
 
+function formatLocalDate(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function buildTrailingRangeExcludingToday(days) {
+  const end = new Date();
+  end.setDate(end.getDate() - 1);
+  const start = new Date(end);
+  start.setDate(start.getDate() - (days - 1));
+  return {
+    start: formatLocalDate(start),
+    end: formatLocalDate(end),
+    rangeSpec: `${formatLocalDate(start)}:${formatLocalDate(end)}`,
+  };
+}
+
+const BURN_COMPONENT_KEYS = {
+  bmr: [
+    "BMR (kcal)",
+    "Basal Metabolic Rate (kcal)",
+    "Resting Metabolic Rate (kcal)",
+    "RMR (kcal)",
+  ],
+  tef: [
+    "TEF (kcal)",
+    "Thermic Effect of Food (kcal)",
+    "Thermal Effect of Food (kcal)",
+  ],
+  exercise: [
+    "Exercise (kcal)",
+    "Exercises (kcal)",
+    "Active Exercise (kcal)",
+    "Workout (kcal)",
+  ],
+  trackerActivity: [
+    "Tracker Activity (kcal)",
+    "Tracker Calories (kcal)",
+    "Daily Activity (kcal)",
+    "Activity (kcal)",
+  ],
+};
+
+function extractBurnedComponents(entry) {
+  const components = {};
+  const missing = [];
+  let total = 0;
+  let rawTotal = 0;
+
+  for (const [component, keys] of Object.entries(BURN_COMPONENT_KEYS)) {
+    const found = getNumericField(entry, keys);
+    if (found) {
+      const raw = found.value;
+      const abs = Math.abs(raw);
+      components[component] = {
+        value: abs,
+        rawValue: raw,
+        sourceKey: found.key,
+      };
+      total += abs;
+      rawTotal += raw;
+    } else {
+      missing.push(component);
+    }
+  }
+
+  return {
+    hasAny: Object.keys(components).length > 0,
+    hasAll: missing.length === 0,
+    total,
+    rawTotal,
+    components,
+    missingComponents: missing,
+  };
+}
+
 function normalizeNutritionList(data) {
   if (!data) return [];
   if (Array.isArray(data)) return data;
@@ -265,10 +343,13 @@ function aggregateBurnedByDate(exercises) {
       burnedRawCalories: 0,
       burnedCalories: 0,
       entries: 0,
+      components: {},
     };
     existing.burnedRawCalories += raw;
     existing.burnedCalories += abs;
     existing.entries += 1;
+    const component = typeof entry?.exercise === "string" ? entry.exercise : "Unknown";
+    existing.components[component] = (existing.components[component] || 0) + abs;
     byDate.set(date, existing);
   }
 
@@ -558,14 +639,17 @@ app.get(
       throw new HttpError(400, "days must be between 1 and 365");
     }
 
-    const range =
+    const explicitRange =
       typeof req.query.range === "string" && req.query.range.trim() !== ""
         ? req.query.range.trim()
-        : `${days}d`;
+        : null;
+    const trailing = buildTrailingRangeExcludingToday(days);
+    const rangeSpec = explicitRange || trailing.rangeSpec;
+    const todayLocal = formatLocalDate(new Date());
 
     const [nutritionRaw, exercisesRaw] = await Promise.all([
-      runCronoJson(["export", "nutrition", "--range", range, "--json"]),
-      runCronoJson(["export", "exercises", "--range", range, "--json"]),
+      runCronoJson(["export", "nutrition", "--range", rangeSpec, "--json"]),
+      runCronoJson(["export", "exercises", "--range", rangeSpec, "--json"]),
     ]);
 
     const nutritionEntries = normalizeNutritionList(nutritionRaw);
@@ -573,27 +657,45 @@ app.get(
     const burnedByDate = aggregateBurnedByDate(exerciseEntries);
 
     const perDay = nutritionEntries
-      .filter(
-        (entry) => String(entry?.Completed || "").toLowerCase() === "true"
-      )
+      .filter((entry) => {
+        const date = typeof entry?.date === "string" ? entry.date : "";
+        const isCompleted = String(entry?.Completed || "").toLowerCase() === "true";
+        const notToday = date !== todayLocal;
+        return isCompleted && notToday;
+      })
       .map((entry) => {
         const date = entry?.date || null;
         const consumed = parseNumber(entry?.calories) ?? 0;
         const burnedAgg = date ? burnedByDate.get(date) : null;
         const inferredBurned = inferBurnedCalories(entry);
+        const burnComponents = extractBurnedComponents(entry);
 
         let burned = 0;
         let burnedRaw = 0;
         let burnedSource = "exercise_export_abs";
+        let burnedBreakdown = {};
+        let missingBurnComponents = Object.keys(BURN_COMPONENT_KEYS);
 
-        if (inferredBurned) {
+        if (burnComponents.hasAny) {
+          burned = burnComponents.total;
+          burnedRaw = burnComponents.rawTotal;
+          burnedSource = burnComponents.hasAll
+            ? "nutrition_components_complete"
+            : "nutrition_components_partial";
+          burnedBreakdown = burnComponents.components;
+          missingBurnComponents = burnComponents.missingComponents;
+        } else if (inferredBurned) {
           burned = inferredBurned.burned;
           burnedRaw = inferredBurned.burned;
           burnedSource = inferredBurned.source;
+          burnedBreakdown = { inferred: inferredBurned.burned };
+          missingBurnComponents = Object.keys(BURN_COMPONENT_KEYS);
         } else if (burnedAgg) {
           burned = burnedAgg.burnedCalories;
           burnedRaw = burnedAgg.burnedRawCalories;
           burnedSource = "exercise_export_abs";
+          burnedBreakdown = burnedAgg.components;
+          missingBurnComponents = ["bmr", "tef"];
         }
 
         const net = consumed - burned;
@@ -604,6 +706,8 @@ app.get(
           burnedCalories: burned,
           burnedRawCalories: burnedRaw,
           burnedSource,
+          burnedBreakdown,
+          missingBurnComponents,
           netCalories: net,
           status: net < 0 ? "deficit" : net > 0 ? "surplus" : "at_target",
         };
@@ -619,7 +723,11 @@ app.get(
     const averageSurplusPerDay = averagePerDay > 0 ? averagePerDay : 0;
 
     res.json({
-      range,
+      range: rangeSpec,
+      trailingWindowExcludingToday:
+        explicitRange === null
+          ? { start: trailing.start, end: trailing.end }
+          : null,
       daysRequested: days,
       daysUsed,
       completedOnly: true,
@@ -642,7 +750,10 @@ app.get(
             : "at_target",
       notes: [
         "completed days only are included",
-        "burnedCalories comes from nutrition burned fields when present, else falls back to absolute exercise caloriesBurned",
+        "today is excluded by date even if marked completed",
+        "default range is yesterday-back for requested day count",
+        "burnedCalories prefers nutrition components: BMR + TEF + Exercise + Tracker Activity when available",
+        "if component columns are unavailable, endpoint falls back to inferred burned fields or exercise export totals",
         "burnedRawCalories preserves raw source sign/value",
         "if averageNetCaloriesPerDay is positive, that is an average surplus",
       ],

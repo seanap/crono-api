@@ -136,7 +136,10 @@ curl -s "$BASE_URL/api/v1/summary/weekly-average-deficit?range=2026-02-01:2026-0
 
 - `consumedCalories` comes from nutrition export daily calories.
 - Completed days only are included.
-- `burnedCalories` uses nutrition burned fields when available, otherwise exercise export `caloriesBurned` with absolute-value normalization.
+- Today is always excluded.
+- Default window for `days=7` is yesterday back through the prior 6 days.
+- `burnedCalories` uses nutrition components when present: `BMR + TEF + Exercise + Tracker Activity`.
+- If those nutrition component columns are missing, fallback is inferred burned fields, then exercise export `caloriesBurned` (absolute value).
 - `burnedRawCalories` preserves raw Cronometer sign (your current data is negative for burned).
 - `averageNetCaloriesPerDay`:
   - `< 0` means average deficit
