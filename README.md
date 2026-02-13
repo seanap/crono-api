@@ -58,6 +58,39 @@ docker compose -f compose.yaml up -d --build
 http://<docker-host-lan-ip>:8787
 ```
 
+## Docker Hub Publish
+
+Local Docker is unavailable in this execution environment, so publishing is set up via GitHub Actions:
+
+- Workflow file: `.github/workflows/dockerhub.yml`
+- Image target: `<DOCKERHUB_USERNAME>/crono-api`
+- Triggers: push to `main` and manual dispatch
+
+Required repo secrets:
+
+- `DOCKERHUB_USERNAME`
+- `DOCKERHUB_TOKEN` (Docker Hub access token)
+
+Set secrets:
+
+```bash
+gh secret set DOCKERHUB_USERNAME -R seanap/crono-api
+gh secret set DOCKERHUB_TOKEN -R seanap/crono-api
+```
+
+Run publish workflow:
+
+```bash
+gh workflow run "Publish Docker Image" -R seanap/crono-api
+```
+
+Watch workflow:
+
+```bash
+gh run list -R seanap/crono-api
+gh run view <run-id> -R seanap/crono-api --log
+```
+
 ## Dockge Notes
 
 - `compose.yaml` is Dockge-friendly.
@@ -65,6 +98,8 @@ http://<docker-host-lan-ip>:8787
 - `./data:/data` persists crono config/runtime files.
 
 If you prefer absolute host paths in Dockge, replace the bind mounts with your server paths.
+
+If you want Dockge to pull from Docker Hub instead of building locally, use `compose.dockerhub.yaml`.
 
 ## Auth
 
