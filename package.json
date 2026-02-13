@@ -1,0 +1,14 @@
+{
+  "name": "crono-api-wrapper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "LAN API wrapper for @milldr/crono",
+  "scripts": {
+    "start": "node src/server.js",
+    "check": "node --check src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
