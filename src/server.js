@@ -227,6 +227,42 @@ function normalizeNutritionList(data) {
   return [data];
 }
 
+function normalizeExerciseList(data) {
+  if (!data) return [];
+  if (Array.isArray(data)) return data;
+  return [data];
+}
+
+function asBoolean(value) {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return false;
+  return ["1", "true", "yes", "on"].includes(value.toLowerCase());
+}
+
+function aggregateBurnedByDate(exercises) {
+  const byDate = new Map();
+
+  for (const entry of exercises) {
+    const date = typeof entry?.date === "string" ? entry.date : null;
+    if (!date) continue;
+
+    const raw = parseNumber(entry?.caloriesBurned) ?? 0;
+    const abs = Math.abs(raw);
+
+    const existing = byDate.get(date) || {
+      burnedRawCalories: 0,
+      burnedCalories: 0,
+      entries: 0,
+    };
+    existing.burnedRawCalories += raw;
+    existing.burnedCalories += abs;
+    existing.entries += 1;
+    byDate.set(date, existing);
+  }
+
+  return byDate;
+}
+
 function computeCalorieBalance(entries, explicitTarget) {
   const perDay = [];
 
@@ -300,6 +336,7 @@ app.get(
         "GET /api/v1/export/{nutrition|exercises|biometrics}?date=YYYY-MM-DD|range=7d&csv=true",
         "GET /api/v1/summary/today-macros?date=YYYY-MM-DD",
         "GET /api/v1/summary/calorie-balance?days=7&target_kcal=2400",
+        "GET /api/v1/summary/weekly-average-deficit?days=7&completed_only=false",
       ],
       write: [
         "POST /api/v1/quick-add",
@@ -496,6 +533,91 @@ app.get(
           ? "No explicit target provided. API attempts to infer target calories from Cronometer export columns when possible."
           : "Using explicit calorie target for all days.",
       ...balance,
+    });
+  })
+);
+
+app.get(
+  "/api/v1/summary/weekly-average-deficit",
+  asyncRoute(async (req, res) => {
+    const daysRaw = parseNumber(req.query.days);
+    const days = daysRaw === null ? 7 : Math.trunc(daysRaw);
+    if (days <= 0 || days > 365) {
+      throw new HttpError(400, "days must be between 1 and 365");
+    }
+
+    const range =
+      typeof req.query.range === "string" && req.query.range.trim() !== ""
+        ? req.query.range.trim()
+        : `${days}d`;
+
+    const completedOnly = asBoolean(req.query.completed_only);
+
+    const [nutritionRaw, exercisesRaw] = await Promise.all([
+      runCronoJson(["export", "nutrition", "--range", range, "--json"]),
+      runCronoJson(["export", "exercises", "--range", range, "--json"]),
+    ]);
+
+    const nutritionEntries = normalizeNutritionList(nutritionRaw);
+    const exerciseEntries = normalizeExerciseList(exercisesRaw);
+    const burnedByDate = aggregateBurnedByDate(exerciseEntries);
+
+    const perDay = nutritionEntries
+      .filter((entry) => {
+        if (!completedOnly) return true;
+        return String(entry?.Completed || "").toLowerCase() === "true";
+      })
+      .map((entry) => {
+        const date = entry?.date || null;
+        const consumed = parseNumber(entry?.calories) ?? 0;
+        const burnedAgg = date ? burnedByDate.get(date) : undefined;
+        const burned = burnedAgg?.burnedCalories ?? 0;
+        const burnedRaw = burnedAgg?.burnedRawCalories ?? 0;
+        const net = consumed - burned;
+        return {
+          date,
+          completed: String(entry?.Completed || "").toLowerCase() === "true",
+          consumedCalories: consumed,
+          burnedCalories: burned,
+          burnedRawCalories: burnedRaw,
+          netCalories: net,
+          status: net < 0 ? "deficit" : net > 0 ? "surplus" : "at_target",
+        };
+      });
+
+    const daysUsed = perDay.length;
+    const consumedTotal = perDay.reduce((sum, d) => sum + d.consumedCalories, 0);
+    const burnedTotal = perDay.reduce((sum, d) => sum + d.burnedCalories, 0);
+    const burnedRawTotal = perDay.reduce((sum, d) => sum + d.burnedRawCalories, 0);
+    const netTotal = consumedTotal - burnedTotal;
+    const averagePerDay = daysUsed === 0 ? 0 : netTotal / daysUsed;
+
+    res.json({
+      range,
+      daysRequested: days,
+      daysUsed,
+      completedOnly,
+      formula:
+        "(trailing calories consumed total - trailing calories burned total) / daysUsed",
+      totals: {
+        consumedCalories: consumedTotal,
+        burnedCalories: burnedTotal,
+        burnedRawCalories: burnedRawTotal,
+        netCalories: netTotal,
+      },
+      averageNetCaloriesPerDay: averagePerDay,
+      averageStatus:
+        averagePerDay < 0
+          ? "deficit"
+          : averagePerDay > 0
+            ? "surplus"
+            : "at_target",
+      notes: [
+        "burnedCalories is derived from absolute value of exercise export caloriesBurned entries",
+        "burnedRawCalories preserves source sign from Cronometer export",
+        "if averageNetCaloriesPerDay is positive, that is an average surplus",
+      ],
+      perDay,
     });
   })
 );

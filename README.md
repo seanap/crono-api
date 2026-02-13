@@ -151,7 +151,22 @@ curl -s "$BASE_URL/api/v1/summary/today-macros?date=2026-02-13"
 curl -s "$BASE_URL/api/v1/summary/calorie-balance?days=7"
 curl -s "$BASE_URL/api/v1/summary/calorie-balance?days=7&target_kcal=2400"
 curl -s "$BASE_URL/api/v1/summary/calorie-balance?range=2026-02-01:2026-02-13"
+
+# weekly average net calories using your formula:
+# (trailing consumed total - trailing burned total) / days
+curl -s "$BASE_URL/api/v1/summary/weekly-average-deficit?days=7"
+curl -s "$BASE_URL/api/v1/summary/weekly-average-deficit?range=2026-02-01:2026-02-13"
+curl -s "$BASE_URL/api/v1/summary/weekly-average-deficit?days=7&completed_only=true"
 ```
+
+`weekly-average-deficit` details:
+
+- `consumedCalories` comes from nutrition export daily calories.
+- `burnedCalories` comes from exercise export `caloriesBurned` with absolute-value normalization.
+- `burnedRawCalories` preserves raw Cronometer sign (your current data is negative for burned).
+- `averageNetCaloriesPerDay`:
+  - `< 0` means average deficit
+  - `> 0` means average surplus
 
 Write endpoints:
 
