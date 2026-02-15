@@ -154,7 +154,37 @@ function buildAutoLoginCode(username, password) {
 
     const url = page.url();
     const loggedIn = !url.includes('/login') && !url.includes('/signin');
-    return { success: true, loggedIn, url };
+    let loginError = null;
+    if (!loggedIn) {
+      loginError = await page.evaluate(() => {
+        const selectors = [
+          ".error-message",
+          ".alert",
+          ".notification",
+          "[class*=\"error\"]",
+          "[class*=\"alert\"]",
+          ".gwt-HTML",
+        ];
+        for (const sel of selectors) {
+          const elements = document.querySelectorAll(sel);
+          for (const el of elements) {
+            const text = el.textContent?.trim();
+            if (
+              text &&
+              text.length > 5 &&
+              text.length < 400 &&
+              el instanceof HTMLElement &&
+              el.offsetParent !== null
+            ) {
+              return text;
+            }
+          }
+        }
+        return null;
+      });
+    }
+
+    return { success: true, loggedIn, url, loginError };
   `;
 }
 
@@ -442,8 +472,10 @@ export async function scrapeEnergySummaryForDates(
     );
     const loginData = loginResult?.result || {};
     if (!loginResult?.success || !loginData?.loggedIn) {
+      const explicitError =
+        loginData?.error || loginData?.loginError || loginResult?.error || "unknown";
       throw new Error(
-        `Cronometer login failed during scrape (${loginData?.error || "unknown"})`
+        `Cronometer login failed during scrape (${explicitError})`
       );
     }
 

@@ -36,6 +36,10 @@ function asyncRoute(fn) {
   };
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function parseNumber(value) {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && value.trim() !== "") {
@@ -180,6 +184,35 @@ async function runCronoJson(args) {
       stdout: raw,
     });
   }
+}
+
+function isRateLimitError(error) {
+  if (!error) return false;
+  const stdout = String(error?.extra?.stdout || "");
+  const stderr = String(error?.extra?.stderr || "");
+  const message = String(error?.message || "");
+  const combined = `${stdout}\n${stderr}\n${message}`.toLowerCase();
+  return combined.includes("rate limit");
+}
+
+async function runCronoJsonWithRetry(
+  args,
+  { attempts = 3, delayMs = 12000 } = {}
+) {
+  let lastError = null;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await runCronoJson(args);
+    } catch (error) {
+      lastError = error;
+      if (isRateLimitError(error) && i < attempts - 1) {
+        await sleep(delayMs);
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw lastError;
 }
 
 function getNumericField(entry, keys) {
@@ -670,7 +703,7 @@ app.get(
     const rangeSpec = explicitRange || trailing.rangeSpec;
     const todayLocal = formatLocalDate(new Date());
 
-    const nutritionRaw = await runCronoJson([
+    const nutritionRaw = await runCronoJsonWithRetry([
       "export",
       "nutrition",
       "--range",
@@ -731,14 +764,14 @@ app.get(
     let exercisesError = null;
     if (needsExerciseFallback) {
       try {
-        const exercisesRaw = await runCronoJson([
+        const exercisesRetried = await runCronoJsonWithRetry([
           "export",
           "exercises",
           "--range",
           rangeSpec,
           "--json",
         ]);
-        const exerciseEntries = normalizeExerciseList(exercisesRaw);
+        const exerciseEntries = normalizeExerciseList(exercisesRetried);
         burnedByDate = aggregateBurnedByDate(exerciseEntries);
       } catch (error) {
         exercisesError = error instanceof Error ? error.message : String(error);
@@ -815,6 +848,23 @@ app.get(
         status: net < 0 ? "deficit" : net > 0 ? "surplus" : "at_target",
       };
     });
+
+    const daysWithoutBurnSource = perDay
+      .filter((day) => day.burnedSource === "none")
+      .map((day) => day.date)
+      .filter(Boolean);
+    if (daysWithoutBurnSource.length > 0) {
+      throw new HttpError(
+        503,
+        "Unable to determine burned calories for one or more completed days.",
+        {
+          range: rangeSpec,
+          daysWithoutBurnSource,
+          scrapeError,
+          exercisesFallbackError: exercisesError,
+        }
+      );
+    }
 
     const daysUsed = perDay.length;
     const consumedTotal = perDay.reduce((sum, d) => sum + d.consumedCalories, 0);
