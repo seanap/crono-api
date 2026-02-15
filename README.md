@@ -60,6 +60,14 @@ CRONO_CRONOMETER_PASSWORD=your_cronometer_pass
 ## Auth
 CRONO_ALLOW_NO_API_KEY=true
 # CRONO_API_KEY=<input_strong_key_here>
+
+## Optional rate-limit hardening
+# CRONO_RATE_LIMIT_RETRY_ATTEMPTS=5
+# CRONO_RATE_LIMIT_BASE_DELAY_MS=12000
+# CRONO_RATE_LIMIT_MAX_DELAY_MS=90000
+# CRONO_EXPORT_CACHE_TTL_MS=300000
+# CRONO_EXPORT_CACHE_STALE_TTL_MS=21600000
+# CRONO_EXPORT_CACHE_MAX_ENTRIES=256
 ```
 
 3. API is available at:
@@ -132,6 +140,8 @@ curl -s "$BASE_URL/api/v1/summary/weekly-average-deficit?days=7"
 curl -s "$BASE_URL/api/v1/summary/weekly-average-deficit?range=2026-02-01:2026-02-13"
 ```
 
+`/api/v1/export/*` JSON responses now include `diagnostics.fetch` showing whether data came from live fetch, fresh cache, or stale cache fallback after rate limiting.
+
 `weekly-average-deficit` details:
 
 - `consumedCalories` comes from nutrition export daily calories.
@@ -140,8 +150,7 @@ curl -s "$BASE_URL/api/v1/summary/weekly-average-deficit?range=2026-02-01:2026-0
 - Default window for `days=7` is yesterday back through the prior 6 days.
 - `burnedCalories` first uses scraped Cronometer Energy Summary data from browser automation.
 - Scrape priority is:
-  - `BMR + TEF + Exercise + Tracker Activity` (component-complete)
-  - `Energy Burned` total from the same screen (when components are incomplete)
+  - best resolved total from scrape (`Energy Burned`, `Energy Balance` proxy, or component sum with baseline)
 - If scrape data is unavailable, fallback is nutrition inferred burned fields, then exercise export `caloriesBurned` (absolute value).
 - `burnedRawCalories` preserves raw Cronometer sign (your current data is negative for burned).
 - `averageNetCaloriesPerDay`:
@@ -152,6 +161,7 @@ curl -s "$BASE_URL/api/v1/summary/weekly-average-deficit?range=2026-02-01:2026-0
   - `component_incomplete`: one or more components missing, fallback used
 - `diagnostics.burnSourceCounts` shows exactly which burn sources were used.
 - `diagnostics.scrapeError` and `diagnostics.exercisesFallbackError` expose scrape/export fallback failures.
+- `diagnostics.nutritionFetch` and `diagnostics.exercisesFetch` show whether export data came from live fetch/cache fallback.
 
 Write endpoints:
 

@@ -5,9 +5,47 @@ import { syncCredentials } from "./credentials-sync.js";
 import { scrapeEnergySummaryForDates } from "./energy-scrape.js";
 
 const APP_VERSION = "0.1.0";
+
+function parseEnvInt(name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const raw = process.env[name];
+  if (typeof raw !== "string" || raw.trim() === "") return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
 const PORT = parseInt(process.env.CRONO_PORT || "8080", 10);
 const HOST = process.env.CRONO_HOST || "0.0.0.0";
 const CLI_TIMEOUT_MS = parseInt(process.env.CRONO_CLI_TIMEOUT_MS || "180000", 10);
+const RATE_LIMIT_RETRY_ATTEMPTS = parseEnvInt(
+  "CRONO_RATE_LIMIT_RETRY_ATTEMPTS",
+  5,
+  { min: 1, max: 10 }
+);
+const RATE_LIMIT_BASE_DELAY_MS = parseEnvInt(
+  "CRONO_RATE_LIMIT_BASE_DELAY_MS",
+  12000,
+  { min: 1000, max: 300000 }
+);
+const RATE_LIMIT_MAX_DELAY_MS = parseEnvInt(
+  "CRONO_RATE_LIMIT_MAX_DELAY_MS",
+  90000,
+  { min: 1000, max: 600000 }
+);
+const EXPORT_CACHE_TTL_MS = parseEnvInt("CRONO_EXPORT_CACHE_TTL_MS", 300000, {
+  min: 1000,
+  max: 86400000,
+});
+const EXPORT_CACHE_STALE_TTL_MS = parseEnvInt(
+  "CRONO_EXPORT_CACHE_STALE_TTL_MS",
+  21600000,
+  { min: 1000, max: 172800000 }
+);
+const EXPORT_CACHE_MAX_ENTRIES = parseEnvInt(
+  "CRONO_EXPORT_CACHE_MAX_ENTRIES",
+  256,
+  { min: 1, max: 5000 }
+);
 const CRONO_BIN =
   process.env.CRONO_BIN || "/app/runtime/node_modules/.bin/crono";
 const CRONO_PACKAGE_JSON =
@@ -21,6 +59,7 @@ const REQUIRE_API_KEY = !ALLOW_NO_API_KEY && API_KEY.length > 0;
 
 const app = express();
 app.use(express.json({ limit: "256kb" }));
+const jsonCommandCache = new Map();
 
 class HttpError extends Error {
   constructor(status, message, extra = undefined) {
@@ -195,23 +234,138 @@ function isRateLimitError(error) {
   return combined.includes("rate limit");
 }
 
+function buildCacheKey(args) {
+  return args.join("\u001f");
+}
+
+function getCachedJson(args, { allowStale = false } = {}) {
+  const key = buildCacheKey(args);
+  const entry = jsonCommandCache.get(key);
+  if (!entry) return null;
+
+  const now = Date.now();
+  const isFresh = now <= entry.expiresAt;
+  const isStaleAllowed = allowStale && now <= entry.staleUntil;
+
+  if (!isFresh && !isStaleAllowed) {
+    jsonCommandCache.delete(key);
+    return null;
+  }
+
+  return {
+    data: entry.data,
+    meta: {
+      cacheHit: true,
+      stale: !isFresh,
+      ageMs: now - entry.cachedAt,
+      cachedAt: new Date(entry.cachedAt).toISOString(),
+    },
+  };
+}
+
+function setCachedJson(
+  args,
+  data,
+  {
+    ttlMs = EXPORT_CACHE_TTL_MS,
+    staleTtlMs = EXPORT_CACHE_STALE_TTL_MS,
+  } = {}
+) {
+  const key = buildCacheKey(args);
+  const now = Date.now();
+  jsonCommandCache.set(key, {
+    data,
+    cachedAt: now,
+    expiresAt: now + ttlMs,
+    staleUntil: now + staleTtlMs,
+  });
+
+  while (jsonCommandCache.size > EXPORT_CACHE_MAX_ENTRIES) {
+    const oldestKey = jsonCommandCache.keys().next().value;
+    if (!oldestKey) break;
+    jsonCommandCache.delete(oldestKey);
+  }
+}
+
+function computeBackoffDelayMs(attemptIndex, baseDelayMs, maxDelayMs) {
+  const exponential = Math.min(maxDelayMs, baseDelayMs * 2 ** attemptIndex);
+  const jitter = Math.floor(exponential * 0.15 * Math.random());
+  return Math.min(maxDelayMs, exponential + jitter);
+}
+
 async function runCronoJsonWithRetry(
   args,
-  { attempts = 3, delayMs = 12000 } = {}
+  {
+    attempts = RATE_LIMIT_RETRY_ATTEMPTS,
+    baseDelayMs = RATE_LIMIT_BASE_DELAY_MS,
+    maxDelayMs = RATE_LIMIT_MAX_DELAY_MS,
+    useCache = false,
+    allowStaleCacheOnRateLimit = false,
+    cacheTtlMs = EXPORT_CACHE_TTL_MS,
+    cacheStaleTtlMs = EXPORT_CACHE_STALE_TTL_MS,
+    meta = null,
+  } = {}
 ) {
+  const freshCache = useCache ? getCachedJson(args, { allowStale: false }) : null;
+  if (freshCache) {
+    if (meta && typeof meta === "object") {
+      Object.assign(meta, {
+        ...freshCache.meta,
+        source: "cache_fresh",
+        attemptsUsed: 0,
+      });
+    }
+    return freshCache.data;
+  }
+
   let lastError = null;
   for (let i = 0; i < attempts; i++) {
     try {
-      return await runCronoJson(args);
+      const data = await runCronoJson(args);
+      if (useCache) {
+        setCachedJson(args, data, {
+          ttlMs: cacheTtlMs,
+          staleTtlMs: cacheStaleTtlMs,
+        });
+      }
+      if (meta && typeof meta === "object") {
+        Object.assign(meta, {
+          cacheHit: false,
+          stale: false,
+          source: "live",
+          attemptsUsed: i + 1,
+        });
+      }
+      return data;
     } catch (error) {
       lastError = error;
       if (isRateLimitError(error) && i < attempts - 1) {
-        await sleep(delayMs);
+        const backoffMs = computeBackoffDelayMs(i, baseDelayMs, maxDelayMs);
+        await sleep(backoffMs);
         continue;
       }
-      throw error;
+      break;
     }
   }
+
+  if (
+    useCache &&
+    allowStaleCacheOnRateLimit &&
+    isRateLimitError(lastError)
+  ) {
+    const staleCache = getCachedJson(args, { allowStale: true });
+    if (staleCache) {
+      if (meta && typeof meta === "object") {
+        Object.assign(meta, {
+          ...staleCache.meta,
+          source: "cache_stale_rate_limited",
+          attemptsUsed: attempts,
+        });
+      }
+      return staleCache.data;
+    }
+  }
+
   throw lastError;
 }
 
@@ -528,7 +682,11 @@ app.get(
   "/api/v1/diary",
   asyncRoute(async (req, res) => {
     const args = ["diary", ...buildDateArgs(req.query), "--json"];
-    const data = await runCronoJson(args);
+    const data = await runCronoJsonWithRetry(args, {
+      attempts: 3,
+      baseDelayMs: 6000,
+      maxDelayMs: 20000,
+    });
     res.json({ data });
   })
 );
@@ -537,7 +695,11 @@ app.get(
   "/api/v1/weight",
   asyncRoute(async (req, res) => {
     const args = ["weight", ...buildDateArgs(req.query), "--json"];
-    const data = await runCronoJson(args);
+    const data = await runCronoJsonWithRetry(args, {
+      attempts: 3,
+      baseDelayMs: 6000,
+      maxDelayMs: 20000,
+    });
     res.json({ data });
   })
 );
@@ -560,8 +722,18 @@ app.get(
       return;
     }
 
-    const data = await runCronoJson(args);
-    res.json({ data });
+    const fetchMeta = {};
+    const data = await runCronoJsonWithRetry(args, {
+      useCache: true,
+      allowStaleCacheOnRateLimit: true,
+      meta: fetchMeta,
+    });
+    res.json({
+      data,
+      diagnostics: {
+        fetch: fetchMeta,
+      },
+    });
   })
 );
 
@@ -655,7 +827,10 @@ app.get(
     }
     args.push("--json");
 
-    const data = await runCronoJson(args);
+    const data = await runCronoJsonWithRetry(args, {
+      useCache: true,
+      allowStaleCacheOnRateLimit: true,
+    });
     const entry = Array.isArray(data) ? data[0] : data;
 
     if (!entry) {
@@ -691,13 +866,16 @@ app.get(
     const targetFromEnv = parseNumber(process.env.CRONO_DEFAULT_CALORIE_TARGET);
     const explicitTarget = targetFromQuery ?? targetFromEnv;
 
-    const data = await runCronoJson([
+    const data = await runCronoJsonWithRetry([
       "export",
       "nutrition",
       "--range",
       range,
       "--json",
-    ]);
+    ], {
+      useCache: true,
+      allowStaleCacheOnRateLimit: true,
+    });
     const entries = normalizeNutritionList(data);
 
     const balance = computeCalorieBalance(entries, explicitTarget);
@@ -729,6 +907,7 @@ app.get(
     const trailing = buildTrailingRangeExcludingToday(days);
     const rangeSpec = explicitRange || trailing.rangeSpec;
     const todayLocal = formatLocalDate(new Date());
+    const nutritionFetchMeta = {};
 
     const nutritionRaw = await runCronoJsonWithRetry([
       "export",
@@ -736,7 +915,11 @@ app.get(
       "--range",
       rangeSpec,
       "--json",
-    ]);
+    ], {
+      useCache: true,
+      allowStaleCacheOnRateLimit: true,
+      meta: nutritionFetchMeta,
+    });
     const nutritionEntries = normalizeNutritionList(nutritionRaw);
     const burnRelatedNutritionKeys = collectBurnRelatedNutritionKeys(
       nutritionEntries
@@ -790,15 +973,21 @@ app.get(
 
     let burnedByDate = new Map();
     let exercisesError = null;
+    let exercisesFetchMeta = null;
     if (needsExerciseFallback) {
       try {
+        exercisesFetchMeta = {};
         const exercisesRetried = await runCronoJsonWithRetry([
           "export",
           "exercises",
           "--range",
           rangeSpec,
           "--json",
-        ]);
+        ], {
+          useCache: true,
+          allowStaleCacheOnRateLimit: true,
+          meta: exercisesFetchMeta,
+        });
         const exerciseEntries = normalizeExerciseList(exercisesRetried);
         burnedByDate = aggregateBurnedByDate(exerciseEntries);
       } catch (error) {
@@ -1013,6 +1202,8 @@ app.get(
         missingComponentCounts,
         burnRelatedNutritionKeys,
         burnSourceCounts,
+        nutritionFetch: nutritionFetchMeta,
+        exercisesFetch: exercisesFetchMeta,
         scrapeAttempted: completedDates.length > 0,
         scrapeDaysRequested: completedDates.length,
         scrapeDaysReturned: scrapedEntries.length,
@@ -1075,6 +1266,12 @@ app.listen(PORT, HOST, () => {
       port: PORT,
       requireApiKey: REQUIRE_API_KEY,
       cronoBin: CRONO_BIN,
+      rateLimitRetryAttempts: RATE_LIMIT_RETRY_ATTEMPTS,
+      rateLimitBaseDelayMs: RATE_LIMIT_BASE_DELAY_MS,
+      rateLimitMaxDelayMs: RATE_LIMIT_MAX_DELAY_MS,
+      exportCacheTtlMs: EXPORT_CACHE_TTL_MS,
+      exportCacheStaleTtlMs: EXPORT_CACHE_STALE_TTL_MS,
+      exportCacheMaxEntries: EXPORT_CACHE_MAX_ENTRIES,
     })
   );
 });
