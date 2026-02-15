@@ -317,6 +317,18 @@ function extractBurnedComponents(entry) {
   };
 }
 
+function collectBurnRelatedNutritionKeys(entries) {
+  const keys = new Set();
+  for (const entry of entries) {
+    for (const key of Object.keys(entry || {})) {
+      if (/bmr|tef|therm|exercise|tracker|activity|burn|expend|balance|energy/i.test(key)) {
+        keys.add(key);
+      }
+    }
+  }
+  return Array.from(keys).sort();
+}
+
 function normalizeNutritionList(data) {
   if (!data) return [];
   if (Array.isArray(data)) return data;
@@ -655,6 +667,9 @@ app.get(
     const nutritionEntries = normalizeNutritionList(nutritionRaw);
     const exerciseEntries = normalizeExerciseList(exercisesRaw);
     const burnedByDate = aggregateBurnedByDate(exerciseEntries);
+    const burnRelatedNutritionKeys = collectBurnRelatedNutritionKeys(
+      nutritionEntries
+    );
 
     const perDay = nutritionEntries
       .filter((entry) => {
@@ -721,6 +736,31 @@ app.get(
     const averagePerDay = daysUsed === 0 ? 0 : netTotal / daysUsed;
     const averageDeficitPerDay = averagePerDay < 0 ? Math.abs(averagePerDay) : 0;
     const averageSurplusPerDay = averagePerDay > 0 ? averagePerDay : 0;
+    const daysWithCompleteComponents = perDay.filter(
+      (d) => d.burnedSource === "nutrition_components_complete"
+    ).length;
+    const daysWithPartialComponents = perDay.filter(
+      (d) => d.burnedSource === "nutrition_components_partial"
+    ).length;
+    const daysUsingFallback = perDay.filter(
+      (d) =>
+        d.burnedSource !== "nutrition_components_complete" &&
+        d.burnedSource !== "nutrition_components_partial"
+    ).length;
+    const missingComponentCounts = { bmr: 0, tef: 0, exercise: 0, trackerActivity: 0 };
+    for (const day of perDay) {
+      for (const component of day.missingBurnComponents || []) {
+        if (Object.prototype.hasOwnProperty.call(missingComponentCounts, component)) {
+          missingComponentCounts[component] += 1;
+        }
+      }
+    }
+    const dataQuality =
+      daysWithCompleteComponents === daysUsed && daysUsed > 0
+        ? "component_complete"
+        : daysWithPartialComponents > 0 || daysUsingFallback > 0
+          ? "component_incomplete"
+          : "no_completed_days";
 
     res.json({
       range: rangeSpec,
@@ -748,6 +788,18 @@ app.get(
           : averagePerDay > 0
             ? "surplus"
             : "at_target",
+      diagnostics: {
+        dataQuality,
+        daysWithCompleteComponents,
+        daysWithPartialComponents,
+        daysUsingFallback,
+        missingComponentCounts,
+        burnRelatedNutritionKeys,
+        fallbackReason:
+          dataQuality === "component_incomplete"
+            ? "Missing BMR/TEF/Exercise/Tracker Activity columns in nutrition export for one or more completed days."
+            : null,
+      },
       notes: [
         "completed days only are included",
         "today is excluded by date even if marked completed",

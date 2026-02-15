@@ -144,6 +144,10 @@ curl -s "$BASE_URL/api/v1/summary/weekly-average-deficit?range=2026-02-01:2026-0
 - `averageNetCaloriesPerDay`:
   - `< 0` means average deficit
   - `> 0` means average surplus
+- `diagnostics.dataQuality`:
+  - `component_complete`: all completed days had BMR/TEF/Exercise/Tracker components
+  - `component_incomplete`: one or more components missing, fallback used
+- `diagnostics.burnRelatedNutritionKeys` shows which burn-like nutrition columns were actually present in export data.
 
 Write endpoints:
 
