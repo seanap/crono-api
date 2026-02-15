@@ -161,8 +161,8 @@ function buildAutoLoginCode(username, password) {
           ".error-message",
           ".alert",
           ".notification",
-          "[class*=\"error\"]",
-          "[class*=\"alert\"]",
+          "[class*='error']",
+          "[class*='alert']",
           ".gwt-HTML",
         ];
         for (const sel of selectors) {
