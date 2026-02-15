@@ -1,9 +1,13 @@
 import { pathToFileURL } from "node:url";
+import { access } from "node:fs/promises";
 
 const DEFAULT_CREDENTIALS_MODULE =
   "/app/runtime/node_modules/@milldr/crono/dist/credentials.js";
-const DEFAULT_KERNEL_SDK_MODULE =
-  "/app/runtime/node_modules/@onkernel/sdk/dist/index.js";
+const DEFAULT_KERNEL_SDK_MODULE_CANDIDATES = [
+  "/app/runtime/node_modules/@onkernel/sdk/index.mjs",
+  "/app/runtime/node_modules/@onkernel/sdk/index.js",
+  "/app/runtime/node_modules/@onkernel/sdk/dist/index.js",
+];
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -30,13 +34,31 @@ async function loadCredentialsModule(raw = process.env) {
   return mod;
 }
 
+async function importFirstExistingModule(candidates) {
+  let lastError = null;
+  for (const modulePath of candidates) {
+    try {
+      await access(modulePath);
+      const moduleUrl = pathToFileURL(modulePath).href;
+      return await import(moduleUrl);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(
+    `Unable to load module from candidates: ${candidates.join(", ")} (${lastError})`
+  );
+}
+
 async function loadKernelClass(raw = process.env) {
-  const modulePath = raw.CRONO_KERNEL_SDK_MODULE || DEFAULT_KERNEL_SDK_MODULE;
-  const moduleUrl = pathToFileURL(modulePath).href;
-  const mod = await import(moduleUrl);
+  const configured = raw.CRONO_KERNEL_SDK_MODULE;
+  const candidates = configured
+    ? [configured]
+    : DEFAULT_KERNEL_SDK_MODULE_CANDIDATES;
+  const mod = await importFirstExistingModule(candidates);
   const Kernel = mod.default || mod.Kernel;
   if (typeof Kernel !== "function") {
-    throw new Error(`Invalid Kernel SDK module at ${modulePath}`);
+    throw new Error(`Invalid Kernel SDK module from candidates: ${candidates.join(", ")}`);
   }
   return Kernel;
 }
