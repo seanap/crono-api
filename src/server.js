@@ -892,6 +892,7 @@ app.get(
         scrapeDaysRequested: completedDates.length,
         scrapeDaysReturned: scrapedEntries.length,
         scrapeError,
+        scrapePreview: scrapedEntries,
         exercisesFallbackAttempted: needsExerciseFallback,
         exercisesFallbackError: exercisesError,
         fallbackReason:

@@ -187,7 +187,11 @@ function buildEnergyScrapeCode(dates) {
       return await page.evaluate(() => {
         function num(str) {
           if (typeof str !== "string") return null;
-          const n = Number(str.replace(/,/g, "").trim());
+          const cleaned = str
+            .replace(/[−–—]/g, "-")
+            .replace(/,/g, "")
+            .trim();
+          const n = Number(cleaned);
           return Number.isFinite(n) ? n : null;
         }
         function escRegex(value) {
@@ -198,18 +202,19 @@ function buildEnergyScrapeCode(dates) {
           }
           return out;
         }
-        function findKcal(text, labels) {
+        function extractFromText(text, labels) {
+          if (!text) return null;
           for (const label of labels) {
             const e = escRegex(label);
             const after = new RegExp(
-              e + "[^\\\\n\\\\r]{0,120}?(-?\\\\d[\\\\d,]*(?:\\\\.\\\\d+)?)\\\\s*kcal",
+              e + "[^\\\\n\\\\r]{0,120}?([−–—-]?\\\\d[\\\\d,]*(?:\\\\.\\\\d+)?)\\\\s*(?:k?cal(?:ories)?)?",
               "i"
             );
             const m1 = text.match(after);
             if (m1) return num(m1[1]);
 
             const before = new RegExp(
-              "(-?\\\\d[\\\\d,]*(?:\\\\.\\\\d+)?)\\\\s*kcal[^\\\\n\\\\r]{0,120}?" + e,
+              "([−–—-]?\\\\d[\\\\d,]*(?:\\\\.\\\\d+)?)\\\\s*(?:k?cal(?:ories)?)?[^\\\\n\\\\r]{0,120}?" + e,
               "i"
             );
             const m2 = text.match(before);
@@ -218,44 +223,96 @@ function buildEnergyScrapeCode(dates) {
           return null;
         }
 
+        function visible(el) {
+          if (!el) return false;
+          if (!(el instanceof Element)) return false;
+          const style = window.getComputedStyle(el);
+          if (!style) return false;
+          if (style.display === "none" || style.visibility === "hidden") return false;
+          const rect = el.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        }
+
+        function extractMetric(labels) {
+          const bodyText = document.body.innerText.replace(/\\u00a0/g, " ");
+          const direct = extractFromText(bodyText, labels);
+          if (direct !== null) return direct;
+
+          const candidates = Array.from(
+            document.querySelectorAll("div, section, article, tr, li, p, span, td, th")
+          );
+
+          for (const el of candidates) {
+            if (!visible(el)) continue;
+            const text = (el.textContent || "").replace(/\\u00a0/g, " ").trim();
+            if (!text || text.length > 400) continue;
+
+            let matchedLabel = false;
+            for (const label of labels) {
+              if (text.toLowerCase().includes(label.toLowerCase())) {
+                matchedLabel = true;
+                break;
+              }
+            }
+            if (!matchedLabel) continue;
+
+            const fromSelf = extractFromText(text, labels);
+            if (fromSelf !== null) return fromSelf;
+
+            const parent = el.closest("tr, li, section, article, div");
+            const parentText = (parent?.textContent || "")
+              .replace(/\\u00a0/g, " ")
+              .trim()
+              .slice(0, 1000);
+            const fromParent = extractFromText(parentText, labels);
+            if (fromParent !== null) return fromParent;
+          }
+
+          return null;
+        }
+
         const text = document.body.innerText.replace(/\\u00a0/g, " ");
 
-        const bmr = findKcal(text, [
+        const bmr = extractMetric([
           "Basal Metabolic Rate",
           "BMR",
           "Resting Metabolic Rate",
           "RMR",
         ]);
-        const tef = findKcal(text, [
+        const tef = extractMetric([
           "Thermic Effect of Food",
           "Thermal Effect of Food",
           "TEF",
         ]);
-        const exercise = findKcal(text, [
+        const exercise = extractMetric([
           "Exercise",
           "Exercises",
           "Active Exercise",
           "Workout",
         ]);
-        const trackerActivity = findKcal(text, [
+        const trackerActivity = extractMetric([
           "Tracker Activity",
           "Tracker Calories",
           "Daily Activity",
           "Activity",
         ]);
-        const baseline = findKcal(text, [
+        const baseline = extractMetric([
           "Baseline",
           "Baseline Activity",
+          "Base",
           "Resting Expenditure",
         ]);
-        const energyBurned = findKcal(text, [
+        const energyBurned = extractMetric([
           "Energy Burned",
           "Calories Burned",
           "Total Burned",
+          "Burned",
+          "Expenditure",
           "Expenditure",
           "Energy Expenditure",
+          "Total Expenditure",
         ]);
-        const energyBalance = findKcal(text, [
+        const energyBalance = extractMetric([
           "Energy Balance",
           "Calorie Balance",
         ]);
