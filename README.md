@@ -138,8 +138,11 @@ curl -s "$BASE_URL/api/v1/summary/weekly-average-deficit?range=2026-02-01:2026-0
 - Completed days only are included.
 - Today is always excluded.
 - Default window for `days=7` is yesterday back through the prior 6 days.
-- `burnedCalories` uses nutrition components when present: `BMR + TEF + Exercise + Tracker Activity`.
-- If those nutrition component columns are missing, fallback is inferred burned fields, then exercise export `caloriesBurned` (absolute value).
+- `burnedCalories` first uses scraped Cronometer Energy Summary data from browser automation.
+- Scrape priority is:
+  - `BMR + TEF + Exercise + Tracker Activity` (component-complete)
+  - `Energy Burned` total from the same screen (when components are incomplete)
+- If scrape data is unavailable, fallback is nutrition inferred burned fields, then exercise export `caloriesBurned` (absolute value).
 - `burnedRawCalories` preserves raw Cronometer sign (your current data is negative for burned).
 - `averageNetCaloriesPerDay`:
   - `< 0` means average deficit
@@ -147,7 +150,8 @@ curl -s "$BASE_URL/api/v1/summary/weekly-average-deficit?range=2026-02-01:2026-0
 - `diagnostics.dataQuality`:
   - `component_complete`: all completed days had BMR/TEF/Exercise/Tracker components
   - `component_incomplete`: one or more components missing, fallback used
-- `diagnostics.burnRelatedNutritionKeys` shows which burn-like nutrition columns were actually present in export data.
+- `diagnostics.burnSourceCounts` shows exactly which burn sources were used.
+- `diagnostics.scrapeError` and `diagnostics.exercisesFallbackError` expose scrape/export fallback failures.
 
 Write endpoints:
 

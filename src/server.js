@@ -2,6 +2,7 @@ import express from "express";
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { syncCredentials } from "./credentials-sync.js";
+import { scrapeEnergySummaryForDates } from "./energy-scrape.js";
 
 const APP_VERSION = "0.1.0";
 const PORT = parseInt(process.env.CRONO_PORT || "8080", 10);
@@ -341,6 +342,16 @@ function normalizeExerciseList(data) {
   return [data];
 }
 
+function mapEnergyScrapeByDate(entries) {
+  const map = new Map();
+  for (const entry of entries || []) {
+    const date = typeof entry?.date === "string" ? entry.date : null;
+    if (!date) continue;
+    map.set(date, entry);
+  }
+  return map;
+}
+
 function aggregateBurnedByDate(exercises) {
   const byDate = new Map();
 
@@ -659,74 +670,151 @@ app.get(
     const rangeSpec = explicitRange || trailing.rangeSpec;
     const todayLocal = formatLocalDate(new Date());
 
-    const [nutritionRaw, exercisesRaw] = await Promise.all([
-      runCronoJson(["export", "nutrition", "--range", rangeSpec, "--json"]),
-      runCronoJson(["export", "exercises", "--range", rangeSpec, "--json"]),
+    const nutritionRaw = await runCronoJson([
+      "export",
+      "nutrition",
+      "--range",
+      rangeSpec,
+      "--json",
     ]);
-
     const nutritionEntries = normalizeNutritionList(nutritionRaw);
-    const exerciseEntries = normalizeExerciseList(exercisesRaw);
-    const burnedByDate = aggregateBurnedByDate(exerciseEntries);
     const burnRelatedNutritionKeys = collectBurnRelatedNutritionKeys(
       nutritionEntries
     );
 
-    const perDay = nutritionEntries
-      .filter((entry) => {
-        const date = typeof entry?.date === "string" ? entry.date : "";
-        const isCompleted = String(entry?.Completed || "").toLowerCase() === "true";
-        const notToday = date !== todayLocal;
-        return isCompleted && notToday;
-      })
-      .map((entry) => {
-        const date = entry?.date || null;
-        const consumed = parseNumber(entry?.calories) ?? 0;
-        const burnedAgg = date ? burnedByDate.get(date) : null;
-        const inferredBurned = inferBurnedCalories(entry);
-        const burnComponents = extractBurnedComponents(entry);
+    const completedEntries = nutritionEntries.filter((entry) => {
+      const date = typeof entry?.date === "string" ? entry.date : "";
+      const isCompleted = String(entry?.Completed || "").toLowerCase() === "true";
+      const notToday = date !== todayLocal;
+      return isCompleted && notToday;
+    });
 
-        let burned = 0;
-        let burnedRaw = 0;
-        let burnedSource = "exercise_export_abs";
-        let burnedBreakdown = {};
-        let missingBurnComponents = Object.keys(BURN_COMPONENT_KEYS);
+    const completedDates = completedEntries
+      .map((entry) => (typeof entry?.date === "string" ? entry.date : null))
+      .filter(Boolean);
 
-        if (burnComponents.hasAny) {
-          burned = burnComponents.total;
-          burnedRaw = burnComponents.rawTotal;
-          burnedSource = burnComponents.hasAll
-            ? "nutrition_components_complete"
-            : "nutrition_components_partial";
-          burnedBreakdown = burnComponents.components;
-          missingBurnComponents = burnComponents.missingComponents;
-        } else if (inferredBurned) {
-          burned = inferredBurned.burned;
-          burnedRaw = inferredBurned.burned;
-          burnedSource = inferredBurned.source;
-          burnedBreakdown = { inferred: inferredBurned.burned };
-          missingBurnComponents = Object.keys(BURN_COMPONENT_KEYS);
-        } else if (burnedAgg) {
-          burned = burnedAgg.burnedCalories;
-          burnedRaw = burnedAgg.burnedRawCalories;
-          burnedSource = "exercise_export_abs";
-          burnedBreakdown = burnedAgg.components;
-          missingBurnComponents = ["bmr", "tef"];
-        }
+    let scrapeError = null;
+    let scrapedEntries = [];
+    if (completedDates.length > 0) {
+      try {
+        scrapedEntries = await scrapeEnergySummaryForDates(completedDates);
+      } catch (error) {
+        scrapeError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    const scrapedByDate = mapEnergyScrapeByDate(scrapedEntries);
 
-        const net = consumed - burned;
-        return {
-          date,
-          completed: String(entry?.Completed || "").toLowerCase() === "true",
-          consumedCalories: consumed,
-          burnedCalories: burned,
-          burnedRawCalories: burnedRaw,
-          burnedSource,
-          burnedBreakdown,
-          missingBurnComponents,
-          netCalories: net,
-          status: net < 0 ? "deficit" : net > 0 ? "surplus" : "at_target",
-        };
-      });
+    const needsExerciseFallback = completedEntries.some((entry) => {
+      const date = entry?.date;
+      if (!date) return true;
+
+      const scraped = scrapedByDate.get(date);
+      if (
+        scraped &&
+        (scraped.hasAllCoreComponents ||
+          scraped.energyBurned !== null ||
+          scraped.componentTotal > 0)
+      ) {
+        return false;
+      }
+
+      const burnComponents = extractBurnedComponents(entry);
+      if (burnComponents.hasAny) return false;
+
+      const inferredBurned = inferBurnedCalories(entry);
+      if (inferredBurned) return false;
+
+      return true;
+    });
+
+    let burnedByDate = new Map();
+    let exercisesError = null;
+    if (needsExerciseFallback) {
+      try {
+        const exercisesRaw = await runCronoJson([
+          "export",
+          "exercises",
+          "--range",
+          rangeSpec,
+          "--json",
+        ]);
+        const exerciseEntries = normalizeExerciseList(exercisesRaw);
+        burnedByDate = aggregateBurnedByDate(exerciseEntries);
+      } catch (error) {
+        exercisesError = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    const perDay = completedEntries.map((entry) => {
+      const date = entry?.date || null;
+      const consumed = parseNumber(entry?.calories) ?? 0;
+      const burnedAgg = date ? burnedByDate.get(date) : null;
+      const inferredBurned = inferBurnedCalories(entry);
+      const burnComponents = extractBurnedComponents(entry);
+      const scraped = date ? scrapedByDate.get(date) : null;
+
+      let burned = null;
+      let burnedRaw = null;
+      let burnedSource = "none";
+      let burnedBreakdown = {};
+      let missingBurnComponents = Object.keys(BURN_COMPONENT_KEYS);
+
+      if (scraped?.hasAllCoreComponents) {
+        burned = scraped.componentTotal;
+        burnedRaw = scraped.componentTotal;
+        burnedSource = "scrape_components_complete";
+        burnedBreakdown = scraped.components;
+        missingBurnComponents = [];
+      } else if (scraped?.energyBurned !== null && scraped?.energyBurned !== undefined) {
+        burned = Math.abs(scraped.energyBurned);
+        burnedRaw = scraped.energyBurned;
+        burnedSource = "scrape_energy_burned_total";
+        burnedBreakdown = { ...scraped.components, energyBurned: scraped.energyBurned };
+        missingBurnComponents = scraped.missingComponents || Object.keys(BURN_COMPONENT_KEYS);
+      } else if (scraped?.componentTotal && scraped.componentTotal > 0) {
+        burned = scraped.componentTotal;
+        burnedRaw = scraped.componentTotal;
+        burnedSource = "scrape_components_partial";
+        burnedBreakdown = scraped.components;
+        missingBurnComponents = scraped.missingComponents || Object.keys(BURN_COMPONENT_KEYS);
+      } else if (burnComponents.hasAny) {
+        burned = burnComponents.total;
+        burnedRaw = burnComponents.rawTotal;
+        burnedSource = burnComponents.hasAll
+          ? "nutrition_components_complete"
+          : "nutrition_components_partial";
+        burnedBreakdown = burnComponents.components;
+        missingBurnComponents = burnComponents.missingComponents;
+      } else if (inferredBurned) {
+        burned = inferredBurned.burned;
+        burnedRaw = inferredBurned.burned;
+        burnedSource = inferredBurned.source;
+        burnedBreakdown = { inferred: inferredBurned.burned };
+      } else if (burnedAgg) {
+        burned = burnedAgg.burnedCalories;
+        burnedRaw = burnedAgg.burnedRawCalories;
+        burnedSource = "exercise_export_abs";
+        burnedBreakdown = burnedAgg.components;
+        missingBurnComponents = ["bmr", "tef"];
+      }
+
+      const burnedFinal = burned ?? 0;
+      const burnedRawFinal = burnedRaw ?? 0;
+      const net = consumed - burnedFinal;
+
+      return {
+        date,
+        completed: true,
+        consumedCalories: consumed,
+        burnedCalories: burnedFinal,
+        burnedRawCalories: burnedRawFinal,
+        burnedSource,
+        burnedBreakdown,
+        missingBurnComponents,
+        netCalories: net,
+        status: net < 0 ? "deficit" : net > 0 ? "surplus" : "at_target",
+      };
+    });
 
     const daysUsed = perDay.length;
     const consumedTotal = perDay.reduce((sum, d) => sum + d.consumedCalories, 0);
@@ -737,16 +825,16 @@ app.get(
     const averageDeficitPerDay = averagePerDay < 0 ? Math.abs(averagePerDay) : 0;
     const averageSurplusPerDay = averagePerDay > 0 ? averagePerDay : 0;
     const daysWithCompleteComponents = perDay.filter(
-      (d) => d.burnedSource === "nutrition_components_complete"
+      (d) =>
+        d.burnedSource === "scrape_components_complete" ||
+        d.burnedSource === "nutrition_components_complete"
     ).length;
     const daysWithPartialComponents = perDay.filter(
-      (d) => d.burnedSource === "nutrition_components_partial"
-    ).length;
-    const daysUsingFallback = perDay.filter(
       (d) =>
-        d.burnedSource !== "nutrition_components_complete" &&
-        d.burnedSource !== "nutrition_components_partial"
+        d.burnedSource === "scrape_components_partial" ||
+        d.burnedSource === "nutrition_components_partial"
     ).length;
+    const daysUsingFallback = perDay.length - daysWithCompleteComponents;
     const missingComponentCounts = { bmr: 0, tef: 0, exercise: 0, trackerActivity: 0 };
     for (const day of perDay) {
       for (const component of day.missingBurnComponents || []) {
@@ -761,6 +849,10 @@ app.get(
         : daysWithPartialComponents > 0 || daysUsingFallback > 0
           ? "component_incomplete"
           : "no_completed_days";
+    const burnSourceCounts = {};
+    for (const day of perDay) {
+      burnSourceCounts[day.burnedSource] = (burnSourceCounts[day.burnedSource] || 0) + 1;
+    }
 
     res.json({
       range: rangeSpec,
@@ -795,17 +887,25 @@ app.get(
         daysUsingFallback,
         missingComponentCounts,
         burnRelatedNutritionKeys,
+        burnSourceCounts,
+        scrapeAttempted: completedDates.length > 0,
+        scrapeDaysRequested: completedDates.length,
+        scrapeDaysReturned: scrapedEntries.length,
+        scrapeError,
+        exercisesFallbackAttempted: needsExerciseFallback,
+        exercisesFallbackError: exercisesError,
         fallbackReason:
           dataQuality === "component_incomplete"
-            ? "Missing BMR/TEF/Exercise/Tracker Activity columns in nutrition export for one or more completed days."
+            ? "Missing complete burn components in scrape/export for one or more completed days."
             : null,
       },
       notes: [
         "completed days only are included",
         "today is excluded by date even if marked completed",
         "default range is yesterday-back for requested day count",
-        "burnedCalories prefers nutrition components: BMR + TEF + Exercise + Tracker Activity when available",
-        "if component columns are unavailable, endpoint falls back to inferred burned fields or exercise export totals",
+        "burnedCalories first uses scraped Cronometer Energy Summary data when available",
+        "scrape prefers BMR + TEF + Exercise + Tracker Activity; else uses scraped Energy Burned total",
+        "if scrape/export components are unavailable, endpoint falls back to inferred burned fields or exercise export totals",
         "burnedRawCalories preserves raw source sign/value",
         "if averageNetCaloriesPerDay is positive, that is an average surplus",
       ],
