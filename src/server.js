@@ -773,6 +773,7 @@ app.get(
         scraped &&
         (scraped.hasAllCoreComponents ||
           scraped.energyBurned !== null ||
+          (scraped.resolvedBurnedTotal || 0) > 0 ||
           scraped.componentTotal > 0)
       ) {
         return false;
@@ -819,35 +820,61 @@ app.get(
       let burnedBreakdown = {};
       let missingBurnComponents = Object.keys(BURN_COMPONENT_KEYS);
 
+      const resolvedSource = scraped?.resolvedBurnedSource || null;
+      const resolvedTotal = scraped?.resolvedBurnedTotal || 0;
       const scrapedComponentTotal =
         scraped?.componentTotalWithBaseline ??
         scraped?.componentTotal ??
         scraped?.componentTotalCore ??
         0;
 
-      if (scraped?.energyBurned !== null && scraped?.energyBurned !== undefined) {
-        burned = Math.abs(scraped.energyBurned);
-        burnedRaw = scraped.energyBurned;
-        burnedSource = "scrape_energy_burned_total";
+      if (resolvedTotal > 0) {
+        burned = resolvedTotal;
+        burnedRaw =
+          resolvedSource === "energyBurned"
+            ? scraped.energyBurned
+            : resolvedSource === "energyBalance"
+              ? scraped.energyBalance
+              : resolvedTotal;
+        burnedSource =
+          resolvedSource === "energyBurned"
+            ? "scrape_energy_burned_total"
+            : resolvedSource === "energyBalance"
+              ? "scrape_energy_balance_proxy_total"
+              : scraped?.hasAllCoreComponents
+                ? "scrape_components_complete"
+                : "scrape_components_partial";
         burnedBreakdown = {
           ...scraped.components,
           energyBurned: scraped.energyBurned,
+          energyBalance: scraped.energyBalance,
           componentTotalCore: scraped.componentTotalCore ?? null,
           componentTotalWithBaseline: scraped.componentTotalWithBaseline ?? null,
+          resolvedBurnedSource: resolvedSource,
+          resolvedBurnedTotal: resolvedTotal,
         };
-        missingBurnComponents = scraped.missingComponents || Object.keys(BURN_COMPONENT_KEYS);
-      } else if (scraped?.hasAllCoreComponents && scrapedComponentTotal > 0) {
-        burned = scrapedComponentTotal;
-        burnedRaw = scrapedComponentTotal;
-        burnedSource = "scrape_components_complete";
-        burnedBreakdown = scraped.components;
-        missingBurnComponents = [];
+        missingBurnComponents =
+          scraped?.hasAllCoreComponents
+            ? []
+            : scraped?.missingComponents || Object.keys(BURN_COMPONENT_KEYS);
       } else if (scrapedComponentTotal > 0) {
         burned = scrapedComponentTotal;
         burnedRaw = scrapedComponentTotal;
-        burnedSource = "scrape_components_partial";
-        burnedBreakdown = scraped.components;
-        missingBurnComponents = scraped.missingComponents || Object.keys(BURN_COMPONENT_KEYS);
+        burnedSource = scraped?.hasAllCoreComponents
+          ? "scrape_components_complete"
+          : "scrape_components_partial";
+        burnedBreakdown = {
+          ...scraped.components,
+          energyBurned: scraped?.energyBurned ?? null,
+          energyBalance: scraped?.energyBalance ?? null,
+          componentTotalCore: scraped?.componentTotalCore ?? null,
+          componentTotalWithBaseline: scraped?.componentTotalWithBaseline ?? null,
+          resolvedBurnedSource: resolvedSource,
+          resolvedBurnedTotal: resolvedTotal,
+        };
+        missingBurnComponents = scraped?.hasAllCoreComponents
+          ? []
+          : scraped?.missingComponents || Object.keys(BURN_COMPONENT_KEYS);
       } else if (burnComponents.hasAny) {
         burned = burnComponents.total;
         burnedRaw = burnComponents.rawTotal;
@@ -915,6 +942,7 @@ app.get(
     const completeBurnSources = new Set([
       "scrape_components_complete",
       "scrape_energy_burned_total",
+      "scrape_energy_balance_proxy_total",
       "nutrition_components_complete",
     ]);
     const partialBurnSources = new Set([
@@ -1002,7 +1030,7 @@ app.get(
         "today is excluded by date even if marked completed",
         "default range is yesterday-back for requested day count",
         "burnedCalories first uses scraped Cronometer Energy Summary data when available",
-        "scrape prefers scraped Energy Burned total; else uses BMR + TEF + Exercise + Tracker Activity (+ Baseline when present)",
+        "scrape resolves total burn from best available metric (Energy Burned, Energy Balance proxy, or component sum with Baseline)",
         "if scrape/export components are unavailable, endpoint falls back to inferred burned fields or exercise export totals",
         "burnedRawCalories preserves raw source sign/value",
         "if averageNetCaloriesPerDay is positive, that is an average surplus",

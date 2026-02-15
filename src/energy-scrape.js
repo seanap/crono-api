@@ -407,6 +407,33 @@ function normalizeScrapedEntry(entry) {
   );
   const componentTotalWithBaseline =
     componentTotalCore + Math.abs(Number(baseline || 0));
+  const energyBurnedAbs =
+    energyBurned === null ? null : Math.abs(Number(energyBurned));
+  const energyBalanceRaw =
+    energyBalance === null ? null : Number(energyBalance);
+  const energyBalanceAbs =
+    energyBalanceRaw === null ? null : Math.abs(energyBalanceRaw);
+
+  const burnCandidates = {
+    energyBurned: energyBurnedAbs,
+    energyBalance:
+      energyBalanceRaw !== null && energyBalanceRaw > 0 ? energyBalanceAbs : null,
+    componentTotalWithBaseline,
+  };
+  if (
+    burnCandidates.energyBalance !== null &&
+    componentTotalWithBaseline > 0
+  ) {
+    const ratio = burnCandidates.energyBalance / componentTotalWithBaseline;
+    if (ratio < 0.7 || ratio > 1.8) {
+      burnCandidates.energyBalance = null;
+    }
+  }
+  const resolvedBurnedEntry = Object.entries(burnCandidates)
+    .filter(([, value]) => Number.isFinite(value) && value > 0)
+    .sort((a, b) => b[1] - a[1])[0] || null;
+  const resolvedBurnedSource = resolvedBurnedEntry ? resolvedBurnedEntry[0] : null;
+  const resolvedBurnedTotal = resolvedBurnedEntry ? resolvedBurnedEntry[1] : 0;
 
   return {
     date: entry?.date || null,
@@ -418,13 +445,15 @@ function normalizeScrapedEntry(entry) {
         trackerActivity === null ? null : Math.abs(Number(trackerActivity)),
       baseline: baseline === null ? null : Math.abs(Number(baseline)),
     },
-    energyBurned:
-      energyBurned === null ? null : Math.abs(Number(energyBurned)),
-    energyBalance: energyBalance === null ? null : Number(energyBalance),
+    energyBurned: energyBurnedAbs,
+    energyBalance: energyBalanceRaw,
     missingComponents,
     hasAllCoreComponents: missingComponents.length === 0,
     componentTotalCore,
     componentTotalWithBaseline,
+    burnCandidates,
+    resolvedBurnedSource,
+    resolvedBurnedTotal,
     // Backward-compatible alias for existing diagnostics consumers.
     componentTotal: componentTotalWithBaseline,
   };
