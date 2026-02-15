@@ -397,14 +397,16 @@ function normalizeScrapedEntry(entry) {
   const energyBurned = entry?.energyBurned ?? null;
   const energyBalance = entry?.energyBalance ?? null;
 
-  const required = { bmr, tef, exercise, trackerActivity };
-  const missingComponents = Object.entries(required)
+  const core = { bmr, tef, exercise, trackerActivity };
+  const missingComponents = Object.entries(core)
     .filter(([, value]) => value === null || value === undefined)
     .map(([key]) => key);
-  const componentTotal = Object.values(required).reduce(
+  const componentTotalCore = Object.values(core).reduce(
     (sum, value) => sum + Math.abs(Number(value || 0)),
     0
   );
+  const componentTotalWithBaseline =
+    componentTotalCore + Math.abs(Number(baseline || 0));
 
   return {
     date: entry?.date || null,
@@ -421,7 +423,10 @@ function normalizeScrapedEntry(entry) {
     energyBalance: energyBalance === null ? null : Number(energyBalance),
     missingComponents,
     hasAllCoreComponents: missingComponents.length === 0,
-    componentTotal,
+    componentTotalCore,
+    componentTotalWithBaseline,
+    // Backward-compatible alias for existing diagnostics consumers.
+    componentTotal: componentTotalWithBaseline,
   };
 }
 

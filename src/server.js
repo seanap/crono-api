@@ -317,10 +317,19 @@ const BURN_COMPONENT_KEYS = {
     "Activity (kcal)",
   ],
 };
+const OPTIONAL_BURN_COMPONENT_KEYS = {
+  baseline: [
+    "Baseline (kcal)",
+    "Baseline Activity (kcal)",
+    "Base (kcal)",
+    "Resting Expenditure (kcal)",
+  ],
+};
 
 function extractBurnedComponents(entry) {
   const components = {};
   const missing = [];
+  const missingOptional = [];
   let total = 0;
   let rawTotal = 0;
 
@@ -341,6 +350,23 @@ function extractBurnedComponents(entry) {
     }
   }
 
+  for (const [component, keys] of Object.entries(OPTIONAL_BURN_COMPONENT_KEYS)) {
+    const found = getNumericField(entry, keys);
+    if (found) {
+      const raw = found.value;
+      const abs = Math.abs(raw);
+      components[component] = {
+        value: abs,
+        rawValue: raw,
+        sourceKey: found.key,
+      };
+      total += abs;
+      rawTotal += raw;
+    } else {
+      missingOptional.push(component);
+    }
+  }
+
   return {
     hasAny: Object.keys(components).length > 0,
     hasAll: missing.length === 0,
@@ -348,6 +374,7 @@ function extractBurnedComponents(entry) {
     rawTotal,
     components,
     missingComponents: missing,
+    missingOptionalComponents: missingOptional,
   };
 }
 
@@ -792,21 +819,32 @@ app.get(
       let burnedBreakdown = {};
       let missingBurnComponents = Object.keys(BURN_COMPONENT_KEYS);
 
-      if (scraped?.hasAllCoreComponents) {
-        burned = scraped.componentTotal;
-        burnedRaw = scraped.componentTotal;
-        burnedSource = "scrape_components_complete";
-        burnedBreakdown = scraped.components;
-        missingBurnComponents = [];
-      } else if (scraped?.energyBurned !== null && scraped?.energyBurned !== undefined) {
+      const scrapedComponentTotal =
+        scraped?.componentTotalWithBaseline ??
+        scraped?.componentTotal ??
+        scraped?.componentTotalCore ??
+        0;
+
+      if (scraped?.energyBurned !== null && scraped?.energyBurned !== undefined) {
         burned = Math.abs(scraped.energyBurned);
         burnedRaw = scraped.energyBurned;
         burnedSource = "scrape_energy_burned_total";
-        burnedBreakdown = { ...scraped.components, energyBurned: scraped.energyBurned };
+        burnedBreakdown = {
+          ...scraped.components,
+          energyBurned: scraped.energyBurned,
+          componentTotalCore: scraped.componentTotalCore ?? null,
+          componentTotalWithBaseline: scraped.componentTotalWithBaseline ?? null,
+        };
         missingBurnComponents = scraped.missingComponents || Object.keys(BURN_COMPONENT_KEYS);
-      } else if (scraped?.componentTotal && scraped.componentTotal > 0) {
-        burned = scraped.componentTotal;
-        burnedRaw = scraped.componentTotal;
+      } else if (scraped?.hasAllCoreComponents && scrapedComponentTotal > 0) {
+        burned = scrapedComponentTotal;
+        burnedRaw = scrapedComponentTotal;
+        burnedSource = "scrape_components_complete";
+        burnedBreakdown = scraped.components;
+        missingBurnComponents = [];
+      } else if (scrapedComponentTotal > 0) {
+        burned = scrapedComponentTotal;
+        burnedRaw = scrapedComponentTotal;
         burnedSource = "scrape_components_partial";
         burnedBreakdown = scraped.components;
         missingBurnComponents = scraped.missingComponents || Object.keys(BURN_COMPONENT_KEYS);
@@ -874,17 +912,26 @@ app.get(
     const averagePerDay = daysUsed === 0 ? 0 : netTotal / daysUsed;
     const averageDeficitPerDay = averagePerDay < 0 ? Math.abs(averagePerDay) : 0;
     const averageSurplusPerDay = averagePerDay > 0 ? averagePerDay : 0;
-    const daysWithCompleteComponents = perDay.filter(
-      (d) =>
-        d.burnedSource === "scrape_components_complete" ||
-        d.burnedSource === "nutrition_components_complete"
+    const completeBurnSources = new Set([
+      "scrape_components_complete",
+      "scrape_energy_burned_total",
+      "nutrition_components_complete",
+    ]);
+    const partialBurnSources = new Set([
+      "scrape_components_partial",
+      "nutrition_components_partial",
+    ]);
+    const daysWithCompleteComponents = perDay.filter((d) =>
+      completeBurnSources.has(d.burnedSource)
     ).length;
-    const daysWithPartialComponents = perDay.filter(
-      (d) =>
-        d.burnedSource === "scrape_components_partial" ||
-        d.burnedSource === "nutrition_components_partial"
+    const daysWithPartialComponents = perDay.filter((d) =>
+      partialBurnSources.has(d.burnedSource)
     ).length;
-    const daysUsingFallback = perDay.length - daysWithCompleteComponents;
+    const daysUsingFallback = perDay.filter(
+      (d) =>
+        !completeBurnSources.has(d.burnedSource) &&
+        !partialBurnSources.has(d.burnedSource)
+    ).length;
     const missingComponentCounts = { bmr: 0, tef: 0, exercise: 0, trackerActivity: 0 };
     for (const day of perDay) {
       for (const component of day.missingBurnComponents || []) {
@@ -955,7 +1002,7 @@ app.get(
         "today is excluded by date even if marked completed",
         "default range is yesterday-back for requested day count",
         "burnedCalories first uses scraped Cronometer Energy Summary data when available",
-        "scrape prefers BMR + TEF + Exercise + Tracker Activity; else uses scraped Energy Burned total",
+        "scrape prefers scraped Energy Burned total; else uses BMR + TEF + Exercise + Tracker Activity (+ Baseline when present)",
         "if scrape/export components are unavailable, endpoint falls back to inferred burned fields or exercise export totals",
         "burnedRawCalories preserves raw source sign/value",
         "if averageNetCaloriesPerDay is positive, that is an average surplus",
